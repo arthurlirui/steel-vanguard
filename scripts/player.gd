@@ -2,7 +2,6 @@ extends CharacterBody2D
 ## Player — main character with full state machine, weapons, vehicles.
 
 signal died
-signal weapon_changed_sig(weapon_id: int)
 signal vehicle_state_changed(in_vehicle: bool)
 
 enum State { IDLE, RUN, JUMP, FALL, CROUCH, SHOOT, KNIFE, GRENADE, HURT, DIE, VEHICLE }
@@ -12,6 +11,7 @@ const JUMP_VELOCITY: float = -520.0
 const GRAVITY: float = 980.0
 const ACCEL: float = 1500.0
 const FRICTION: float = 1800.0
+const MAX_JUMPS: int = 2  # Double jump (1 ground + 1 air)
 const MAX_HP: int = 100
 const INVINCIBLE_TIME: float = 1.5
 const KNIFE_RANGE: float = 45.0
@@ -27,6 +27,7 @@ var facing: int = 1
 var hp: int = MAX_HP
 var invincible: bool = false
 var invincible_timer: float = 0.0
+var jumps_left: int = MAX_JUMPS  # decremented on each jump, refilled on landing
 var can_shoot: bool = true
 var shoot_cooldown: float = 0.0
 var grenade_cd: float = 0.0
@@ -37,6 +38,9 @@ var vehicle_node: Node = null
 var blink_timer: float = 0.0
 var current_weapon: int = 0
 var bullet_scene: PackedScene
+var grenade_scene: PackedScene
+var spawn_point: Vector2 = Vector2.ZERO
+var _dying: bool = false  # guards the death tween so it only runs once
 
 var body_rect: ColorRect
 var head_rect: ColorRect
@@ -47,8 +51,10 @@ var knife_rect: ColorRect
 func _ready() -> void:
 	add_to_group("player")
 	bullet_scene = load("res://scenes/bullet.tscn")
+	grenade_scene = load("res://scenes/grenade.tscn")
 	_create_visuals()
 	_update_aim_direction()
+	spawn_point = global_position
 	GameManager.health_changed.emit(hp, MAX_HP)
 	GameManager.weapon_changed.emit(current_weapon)
 
@@ -78,14 +84,26 @@ func _handle_input() -> void:
 	if in_vehicle:
 		_handle_vehicle_input()
 		return
+	# Direct weapon select via number keys 1-5
+	for w in range(5):
+		var action_name := "weapon_slot_%d" % (w + 1)
+		if InputMap.has_action(action_name) and Input.is_action_just_pressed(action_name):
+			_select_weapon(w)
+			return
+	# Cycle weapon via the generic "switch_weapon" action (B key, etc.)
 	if Input.is_action_just_pressed("switch_weapon"):
 		_cycle_weapon()
 	_update_aim_direction()
-	if Input.is_action_pressed("shoot") and can_shoot:
+	# Auto weapons fire on hold; semi-auto weapons fire only on press edge.
+	var wdata := WeaponData.get_weapon(current_weapon)
+	var is_auto: bool = wdata.get("auto", false)
+	var fire_held: bool = Input.is_action_pressed("shoot")
+	var fire_trigger: bool = fire_held if is_auto else Input.is_action_just_pressed("shoot")
+	if fire_trigger and can_shoot:
 		_shoot()
 	if Input.is_action_just_pressed("grenade") and grenade_cd <= 0:
 		_throw_grenade()
-	if not Input.is_action_pressed("shoot") and knife_cd <= 0:
+	if not fire_held and knife_cd <= 0:
 		_try_melee()
 	if Input.is_action_just_pressed("enter_vehicle"):
 		_try_enter_vehicle()
@@ -145,15 +163,21 @@ func _physics_process(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, 0, FRICTION * delta)
 		if is_on_floor() and current_state not in [State.SHOOT, State.HURT, State.GRENADE]:
 			current_state = State.IDLE
-	if Input.is_action_just_pressed("jump") and is_on_floor() and not crouching:
+	if Input.is_action_just_pressed("jump") and jumps_left > 0 and not crouching:
 		velocity.y = JUMP_VELOCITY
+		jumps_left -= 1
 		current_state = State.JUMP
+		AudioManager.play_sfx(AudioManager.SFX_PLAYER_JUMP)
 	if not is_on_floor():
 		if velocity.y < 0:
 			current_state = State.JUMP
 		else:
 			current_state = State.FALL
 	move_and_slide()
+	# Refill jumps whenever grounded. Placed after move_and_slide() so the
+	# "just left the ground" frame doesn't immediately reset the counter.
+	if is_on_floor():
+		jumps_left = MAX_JUMPS
 
 func _update_state(delta: float) -> void:
 	match current_state:
@@ -186,8 +210,9 @@ func _shoot() -> void:
 		var dir := aim_dir.rotated(spread_angle)
 		bullet.setup(dir, wdata["bullet_speed"], wdata["damage"], wdata["color"], wdata["bullet_scale"], true)
 		bullet.global_position = global_position + aim_dir * 20
-		get_tree().current_scene.add_child(bullet)
+		get_parent().add_child(bullet)
 	_spawn_muzzle_flash()
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_SHOOT)
 
 func _shoot_from_vehicle() -> void:
 	can_shoot = false
@@ -195,7 +220,8 @@ func _shoot_from_vehicle() -> void:
 	var bullet := bullet_scene.instantiate()
 	bullet.setup(aim_dir, 1000.0, 8, Color(1.0, 0.6, 0.2), 0.6, true)
 	bullet.global_position = global_position + aim_dir * 30
-	get_tree().current_scene.add_child(bullet)
+	get_parent().add_child(bullet)
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_SHOOT)
 
 func _fire_tank_cannon() -> void:
 	if not vehicle_node:
@@ -204,8 +230,9 @@ func _fire_tank_cannon() -> void:
 	var bullet := bullet_scene.instantiate()
 	bullet.setup(aim_dir, 600.0, 80, Color(0.9, 0.3, 0.1), 2.0, true)
 	bullet.global_position = global_position + aim_dir * 40
-	get_tree().current_scene.add_child(bullet)
-	_screen_shake(8.0)
+	get_parent().add_child(bullet)
+	CameraFX.shake(8.0)
+	AudioManager.play_sfx(AudioManager.SFX_TANK_CANNON)
 
 func _try_melee() -> void:
 	var enemies := get_tree().get_nodes_in_group("enemies")
@@ -220,6 +247,7 @@ func _try_melee() -> void:
 				knife_rect.visible = true
 				var tw := create_tween()
 				tw.tween_property(knife_rect, "visible", false, 0.2)
+			AudioManager.play_sfx(AudioManager.SFX_PLAYER_MELEE)
 			break
 
 func _throw_grenade() -> void:
@@ -227,13 +255,29 @@ func _throw_grenade() -> void:
 		return
 	grenade_cd = GRENADE_COOLDOWN
 	current_state = State.GRENADE
-	# Create a grenade projectile (using bullet scene with custom params)
-	var grenade := bullet_scene.instantiate()
+	# Thrown grenade — uses the dedicated grenade scene (arc + explosion).
+	var grenade := grenade_scene.instantiate()
 	var throw_dir := Vector2(facing, -1.5).normalized()
-	grenade.setup(throw_dir, GRENADE_SPEED, GRENADE_DAMAGE, Color(0.3, 0.8, 0.3), 1.5, true)
-	grenade.lifetime = 1.5
+	grenade.setup(throw_dir, GRENADE_SPEED, GRENADE_DAMAGE, GRENADE_RADIUS, true)
 	grenade.global_position = global_position + Vector2(0, -10)
-	get_tree().current_scene.add_child(grenade)
+	get_parent().add_child(grenade)
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_GRENADE)
+
+func _select_weapon(weapon_id: int) -> void:
+	if weapon_id < 0 or weapon_id > 4:
+		return
+	if GameManager.weapon_ammo.get(weapon_id, 0) == 0:
+		return  # Can't select an empty weapon
+	current_weapon = weapon_id
+	GameManager.switch_weapon(weapon_id)
+
+## Called by pickups to directly select a weapon after switch_weapon ran.
+func select_weapon_external(weapon_id: int) -> void:
+	current_weapon = weapon_id
+
+## Restores HP from a health pickup; clamps to MAX_HP.
+func heal(amount: int) -> void:
+	hp = min(MAX_HP, hp + amount)
 
 func _cycle_weapon() -> void:
 	var next_w := current_weapon
@@ -267,21 +311,32 @@ func take_damage(amount: int) -> void:
 	velocity.x = -facing * 150
 	velocity.y = -200
 	GameManager.player_take_damage(amount)
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_HURT)
+	CameraFX.shake(4.0)
 	if hp <= 0:
 		_die()
 
 func _die() -> void:
+	if _dying:
+		return
+	_dying = true
 	current_state = State.DIE
 	died.emit()
 	_spawn_explosion()
-	# Respawn or game over after delay
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_DIE)
+	CameraFX.shake(12.0)
+	# Defer respawn/game-over; GameManager._lose_life is the single source of
+	# truth for whether lives remain. If it already triggered game_over, the
+	# state will be GAME_OVER by the time the tween fires.
 	var tw := create_tween()
 	tw.tween_interval(2.0)
 	tw.tween_callback(func():
-		if GameManager.lives > 0:
-			respawn()
-		else:
-			GameManager.game_over()
+		_dying = false
+		if GameManager.current_state == GameManager.GameState.GAME_OVER:
+			return  # HUD overlay handles restart
+		if GameManager.current_state == GameManager.GameState.VICTORY:
+			return
+		respawn()
 	)
 
 func respawn() -> void:
@@ -289,7 +344,7 @@ func respawn() -> void:
 	current_state = State.IDLE
 	invincible = true
 	invincible_timer = 3.0
-	global_position = Vector2(100, 300)
+	global_position = spawn_point
 	velocity = Vector2.ZERO
 	GameManager.player_health = MAX_HP
 	GameManager.health_changed.emit(hp, MAX_HP)
@@ -299,16 +354,8 @@ func _spawn_explosion() -> void:
 	if exp_scene:
 		var fx := exp_scene.instantiate()
 		fx.global_position = global_position
-		get_tree().current_scene.add_child(fx)
-
-func _screen_shake(amount: float) -> void:
-	var cam := get_viewport().get_camera_2d()
-	if cam:
-		var orig := cam.offset
-		var tw := create_tween()
-		for i in 4:
-			tw.tween_property(cam, "offset", orig + Vector2(randf_range(-amount, amount), randf_range(-amount, amount)), 0.05)
-		tw.tween_property(cam, "offset", orig, 0.05)
+		fx.is_player_explosion = true
+		get_parent().add_child(fx)
 
 # ============================================================
 # Vehicle
@@ -324,6 +371,7 @@ func _try_enter_vehicle() -> void:
 			visible = false
 			vehicle_state_changed.emit(true)
 			GameManager.vehicle_entered.emit()
+			AudioManager.play_sfx(AudioManager.SFX_PLAYER_VEHICLE_IN)
 			break
 
 func _exit_vehicle() -> void:
@@ -338,6 +386,7 @@ func _exit_vehicle() -> void:
 	global_position += Vector2(0, -30)
 	vehicle_state_changed.emit(false)
 	GameManager.vehicle_exited.emit()
+	AudioManager.play_sfx(AudioManager.SFX_PLAYER_VEHICLE_OUT)
 
 # ============================================================
 # Visuals

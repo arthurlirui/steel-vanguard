@@ -6,12 +6,17 @@ const LEVEL_HEIGHT: float = 1920.0
 const GROUND_Y: float = 1500.0
 const CAMERA_LIMIT_LEFT: float = 0.0
 const CAMERA_LIMIT_TOP: float = 0.0
-const SCROLL_SPEED: float = 0.5
+const CAMERA_FOLLOW_SPEED: float = 5.0
+const CAMERA_Y: float = GROUND_Y - 400.0
+const ENEMY_DROP_CHANCE: float = 0.35
 
 var player_scene: PackedScene
 var enemy_scene: PackedScene
 var tank_scene: PackedScene
 var hud_scene: PackedScene
+var pickup_scene: PackedScene
+var pow_scene: PackedScene
+var destructible_scene: PackedScene
 
 var player_node: Node2D
 var hud_node: CanvasLayer
@@ -21,21 +26,27 @@ var tanks: Array[Node] = []
 var level_end_x: float = LEVEL_WIDTH - 200
 var boss_spawned: bool = false
 var boss_defeated: bool = false
-var enemies_killed: int = 0
-var total_enemies: int = 0
 
 # Parallax layers
 var parallax_bg: ParallaxBackground
-var bg_layers: Array[ColorRect] = []
 
 func _ready() -> void:
 	_setup_level()
 	_spawn_player()
 	_spawn_enemies()
 	_spawn_tank()
+	_spawn_destructibles()
+	_spawn_pow_hostages()
+	_spawn_pickups()
 	_spawn_hud()
 	_setup_parallax()
 	_setup_camera()
+	# Enter play state — without this, GameManager stays in MENU and
+	# player_take_damage (and other PLAYING-gated logic) would no-op.
+	GameManager.total_enemies = enemies.size()
+	GameManager.enemies_killed = 0
+	GameManager.enemies_remaining_changed.emit(0, GameManager.total_enemies)
+	GameManager.start_game()
 
 func _setup_level() -> void:
 	# Create ground
@@ -73,26 +84,20 @@ func _spawn_player() -> void:
 
 func _spawn_enemies() -> void:
 	enemy_scene = load("res://scenes/enemy_soldier.tscn")
-	# Spawn enemies at various positions
-	var positions := [
-		Vector2(500, GROUND_Y - 50),
-		Vector2(800, GROUND_Y - 50),
-		Vector2(1200, GROUND_Y - 50),
-		Vector2(1600, GROUND_Y - 50),
-		Vector2(2000, GROUND_Y - 50),
-		Vector2(2500, GROUND_Y - 50),
-		Vector2(3000, GROUND_Y - 50),
-		Vector2(3500, GROUND_Y - 50),
-		Vector2(4000, GROUND_Y - 50),
-		Vector2(4500, GROUND_Y - 50),
+	# (x, type) pairs. Type: 0=grunt, 1=shield, 2=bazooka, 3=bug (hopper)
+	var spawns := [
+		[500, 0], [800, 0], [1100, 3], [1200, 1], [1600, 0], [2000, 2],
+		[2400, 3], [2500, 0], [3000, 1], [3500, 0], [4000, 2], [4300, 3], [4500, 1],
 	]
-	for pos in positions:
+	for entry in spawns:
+		var x: float = entry[0]
+		var type: int = entry[1]
 		var enemy := enemy_scene.instantiate()
-		enemy.global_position = pos
+		enemy.global_position = Vector2(x, GROUND_Y - 50)
+		enemy.enemy_type = type
 		enemy.died.connect(_on_enemy_died)
 		add_child(enemy)
 		enemies.append(enemy)
-	total_enemies = enemies.size()
 
 func _spawn_tank() -> void:
 	tank_scene = load("res://scenes/slug_tank.tscn")
@@ -100,6 +105,38 @@ func _spawn_tank() -> void:
 	tank.global_position = Vector2(2200, GROUND_Y - 60)
 	add_child(tank)
 	tanks.append(tank)
+
+func _spawn_destructibles() -> void:
+	destructible_scene = load("res://scenes/destructible.tscn")
+	var positions := [700, 1400, 2300, 3200, 4200, 5200]
+	for x in positions:
+		var d := destructible_scene.instantiate()
+		d.global_position = Vector2(x, GROUND_Y - 40)
+		add_child(d)
+
+func _spawn_pow_hostages() -> void:
+	pow_scene = load("res://scenes/pow_hostage.tscn")
+	var positions := [1800, 3300, 5000]
+	for x in positions:
+		var p := pow_scene.instantiate()
+		p.global_position = Vector2(x, GROUND_Y - 40)
+		add_child(p)
+
+func _spawn_pickups() -> void:
+	pickup_scene = load("res://scenes/pickup.tscn")
+	# Pre-placed ammo/health/grenade caches
+	_spawn_pickup(Vector2(1100, GROUND_Y - 30), PickupData.PickupType.HEALTH, 25)
+	_spawn_pickup(Vector2(2800, GROUND_Y - 30), PickupData.PickupType.GRENADE, 5)
+	_spawn_pickup(Vector2(3800, GROUND_Y - 30), PickupData.PickupType.WEAPON, 1, 120)  # HMG
+	_spawn_pickup(Vector2(4800, GROUND_Y - 30), PickupData.PickupType.HEALTH, 50)
+
+func _spawn_pickup(pos: Vector2, type: int, amount: int, weapon_id: int = 0) -> void:
+	var p := pickup_scene.instantiate()
+	p.global_position = pos
+	p.pickup_type = type
+	p.amount = amount
+	p.weapon_id = weapon_id
+	add_child(p)
 
 func _spawn_hud() -> void:
 	hud_scene = load("res://scenes/hud.tscn")
@@ -113,10 +150,11 @@ func _setup_camera() -> void:
 	camera.limit_top = int(CAMERA_LIMIT_TOP)
 	camera.limit_right = int(LEVEL_WIDTH)
 	camera.limit_bottom = int(LEVEL_HEIGHT)
-	camera.position_smoothing_enabled = true
-	camera.position_smoothing_speed = 5.0
+	# We drive the position ourselves via lerp in _process for stable,
+	# jitter-free following; smoothing on the Camera2D would fight our updates.
+	camera.position_smoothing_enabled = false
 	if player_node:
-		camera.global_position = player_node.global_position
+		camera.global_position = Vector2(player_node.global_position.x, CAMERA_Y)
 	add_child(camera)
 
 func _setup_parallax() -> void:
@@ -141,15 +179,14 @@ func _add_parallax_layer(color: Color, size: Vector2, scroll_scale: Vector2, y_o
 	rect.size = size
 	rect.position = Vector2(0, y_offset)
 	layer.add_child(rect)
-	bg_layers.append(rect)
 
 func _process(delta: float) -> void:
 	if not is_instance_valid(player_node):
 		return
-	# Camera follows player but stays within bounds
-	var cam_x := clampf(player_node.global_position.x, 540, LEVEL_WIDTH - 540)
-	camera.global_position.x = cam_x
-	camera.global_position.y = player_node.global_position.y - 200
+	# Camera follows player smoothly. Y is fixed (no jump bob); X clamped to level bounds.
+	var target_x := clampf(player_node.global_position.x, 540, LEVEL_WIDTH - 540)
+	var target := Vector2(target_x, CAMERA_Y)
+	camera.global_position = camera.global_position.lerp(target, clampf(delta * CAMERA_FOLLOW_SPEED, 0.0, 1.0))
 	# Check win condition
 	if player_node.global_position.x >= level_end_x and not boss_spawned:
 		_spawn_boss()
@@ -162,19 +199,33 @@ func _spawn_boss() -> void:
 	var boss_scene := load("res://scenes/enemy_soldier.tscn")
 	var boss := boss_scene.instantiate()
 	boss.global_position = Vector2(LEVEL_WIDTH - 300, GROUND_Y - 100)
-	boss.set("hp", 500)
-	boss.set("detection_range", 800.0)
-	boss.set("attack_range", 600.0)
-	boss.set("attack_cooldown", 0.8)
-	boss.set("max_hp", 500)
-	boss.scale = Vector2(3.0, 3.0)
 	boss.died.connect(_on_boss_died)
 	add_child(boss)
+	# Configure after add_child so _ready has applied defaults; configure_as_boss
+	# overwrites HP/detection/attack fields deterministically (avoids relying on
+	# the order of set() vs _ready's hp=max_hp).
+	boss.configure_as_boss(500, 800.0, 600.0, 0.8)
 	enemies.append(boss)
+	GameManager.total_enemies += 1
+	GameManager.enemies_remaining_changed.emit(GameManager.enemies_killed, GameManager.total_enemies)
 
 func _on_enemy_died(pos: Vector2) -> void:
-	enemies_killed += 1
+	# register_enemy_killed is invoked by the enemy itself (single source of
+	# truth for scoring); here we just spawn a chance-based drop.
+	if randf() < ENEMY_DROP_CHANCE:
+		var pickup_scene_res := load("res://scenes/pickup.tscn")
+		if pickup_scene_res:
+			var p := pickup_scene_res.instantiate()
+			p.global_position = pos + Vector2(0, -10)
+			# 60% small ammo, 40% grenade
+			if randf() < 0.6:
+				p.pickup_type = PickupData.PickupType.AMMO
+				p.amount = 30
+				p.weapon_id = GameManager.current_weapon_id
+			else:
+				p.pickup_type = PickupData.PickupType.GRENADE
+				p.amount = 1
+			add_child(p)
 
 func _on_boss_died(pos: Vector2) -> void:
 	boss_defeated = true
-	GameManager.add_score(5000)

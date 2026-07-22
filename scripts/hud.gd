@@ -10,6 +10,8 @@ var weapon_ammo_label: Label
 var grenade_label: Label
 var pow_label: Label
 var level_label: Label
+var enemies_label: Label
+var pause_button: Button
 
 # Touch controls
 var joystick_bg: ColorRect
@@ -30,8 +32,14 @@ var overlay_panel: Panel
 var overlay_label: Label
 var overlay_button: Button
 
+# Pause overlay
+var pause_panel: Panel
+var pause_resume_button: Button
+
 func _ready() -> void:
 	layer = 10
+	# Keep the HUD responsive while the scene tree is paused (pause overlay).
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	is_touch = DisplayServer.is_touchscreen_available()
 	_create_top_hud()
 	if is_touch:
@@ -49,6 +57,17 @@ func _connect_signals() -> void:
 	GameManager.pow_rescued.connect(_on_pow_changed)
 	GameManager.level_changed.connect(_on_level_changed)
 	GameManager.state_changed.connect(_on_state_changed)
+	GameManager.enemies_remaining_changed.connect(_on_enemies_remaining_changed)
+
+# R key restart — only fires outside active play (GAME_OVER / VICTORY / PAUSED),
+# so it can't be triggered by accident mid-level. process_mode is ALWAYS, so
+# this still receives input while the tree is paused.
+func _unhandled_input(_event: InputEvent) -> void:
+	if Input.is_action_just_pressed("restart"):
+		var st: int = GameManager.current_state
+		if st == GameManager.GameState.GAME_OVER or st == GameManager.GameState.VICTORY or st == GameManager.GameState.PAUSED:
+			GameManager.restart_game()
+			get_viewport().set_input_as_handled()
 
 func _create_top_hud() -> void:
 	var top_panel := Panel.new()
@@ -118,6 +137,20 @@ func _create_top_hud() -> void:
 	pow_label.add_theme_font_size_override("font_size", 18)
 	top_panel.add_child(pow_label)
 
+	enemies_label = Label.new()
+	enemies_label.position = Vector2(20, 90)
+	enemies_label.text = "ENEMIES: 0/0"
+	enemies_label.add_theme_font_size_override("font_size", 18)
+	top_panel.add_child(enemies_label)
+
+	pause_button = Button.new()
+	pause_button.text = "II"
+	pause_button.position = Vector2(1010, 20)
+	pause_button.size = Vector2(50, 50)
+	pause_button.add_theme_font_size_override("font_size", 22)
+	pause_button.pressed.connect(_on_pause_button_pressed)
+	top_panel.add_child(pause_button)
+
 func _create_touch_controls() -> void:
 	var js_size := 240.0
 	joystick_origin = Vector2(160, 1750)
@@ -170,6 +203,11 @@ func _input(event: InputEvent) -> void:
 		_handle_touch(event)
 	elif event is InputEventScreenDrag:
 		_handle_drag(event)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("pause"):
+		_toggle_pause()
+		get_viewport().set_input_as_handled()
 
 func _handle_touch(event: InputEventScreenTouch) -> void:
 	if event.pressed:
@@ -245,6 +283,7 @@ func _refresh_all() -> void:
 	_on_grenade_changed(GameManager.grenade_count)
 	_on_pow_changed(GameManager.pow_rescued_count)
 	_on_level_changed(GameManager.current_level)
+	_on_enemies_remaining_changed(GameManager.enemies_killed, GameManager.total_enemies)
 
 func _on_score_changed(new_score: int) -> void:
 	if score_label:
@@ -286,13 +325,22 @@ func _on_level_changed(level_num: int) -> void:
 	if level_label:
 		level_label.text = "LV: %d" % level_num
 
+func _on_enemies_remaining_changed(killed: int, total: int) -> void:
+	if enemies_label:
+		enemies_label.text = "ENEMIES: %d/%d" % [killed, total]
+
 func _on_state_changed(new_state: GameManager.GameState) -> void:
 	match new_state:
 		GameManager.GameState.GAME_OVER:
+			_hide_pause_overlay()
 			_show_overlay("GAME OVER", "Restart")
 		GameManager.GameState.VICTORY:
+			_hide_pause_overlay()
 			_show_overlay("VICTORY!", "Play Again")
+		GameManager.GameState.PAUSED:
+			_show_pause_overlay()
 		_:
+			_hide_pause_overlay()
 			_hide_overlay()
 
 func _show_overlay(title: String, btn_text: String) -> void:
@@ -330,4 +378,57 @@ func _hide_overlay() -> void:
 		overlay_panel = null
 
 func _on_overlay_button() -> void:
+	AudioManager.play_sfx(AudioManager.SFX_UI_CLICK)
 	GameManager.restart_game()
+
+# ============================================================
+# Pause
+# ============================================================
+
+func _on_pause_button_pressed() -> void:
+	AudioManager.play_sfx(AudioManager.SFX_UI_CLICK)
+	_toggle_pause()
+
+func _toggle_pause() -> void:
+	match GameManager.current_state:
+		GameManager.GameState.PLAYING:
+			GameManager.pause_game()
+		GameManager.GameState.PAUSED:
+			GameManager.resume_game()
+
+func _show_pause_overlay() -> void:
+	if pause_panel:
+		return
+	AudioManager.play_sfx(AudioManager.SFX_PAUSE)
+	pause_panel = Panel.new()
+	pause_panel.position = Vector2(290, 760)
+	pause_panel.size = Vector2(500, 400)
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.05, 0.05, 0.1, 0.9)
+	bg.border_width_all = 4
+	bg.border_color = Color(0.5, 0.7, 1.0)
+	pause_panel.add_theme_stylebox("panel", bg)
+	add_child(pause_panel)
+	var title := Label.new()
+	title.text = "PAUSED"
+	title.position = Vector2(0, 80)
+	title.size = Vector2(500, 80)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 56)
+	pause_panel.add_child(title)
+	pause_resume_button = Button.new()
+	pause_resume_button.text = "Resume"
+	pause_resume_button.position = Vector2(150, 240)
+	pause_resume_button.size = Vector2(200, 60)
+	pause_resume_button.add_theme_font_size_override("font_size", 24)
+	pause_resume_button.pressed.connect(_on_resume_button_pressed)
+	pause_panel.add_child(pause_resume_button)
+
+func _hide_pause_overlay() -> void:
+	if pause_panel:
+		pause_panel.queue_free()
+		pause_panel = null
+
+func _on_resume_button_pressed() -> void:
+	AudioManager.play_sfx(AudioManager.SFX_UI_CLICK)
+	GameManager.resume_game()
