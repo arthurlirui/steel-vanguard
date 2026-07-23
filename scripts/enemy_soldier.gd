@@ -38,6 +38,7 @@ const BUG_JUMP_COOLDOWN: float = 1.2
 const BUG_HOP_RANGE: float = 300.0
 const BUG_HOP_SPEED_MULT: float = 1.3
 const BUG_CONTACT_DAMAGE: int = 15
+const BUG_CONTACT_COOLDOWN: float = 0.6  # BUG variant: min time between contact hits
 const BOSS_PHASE2_HP_FRACTION: float = 0.5
 const BOSS_FAN_INTERVAL: int = 3
 const BOSS_FAN_SPREAD_DEG: float = 18.0
@@ -52,10 +53,12 @@ var hit_stun: float = 0.0
 var spot_timer: float = 0.0
 var player_ref: Node = null
 var bullet_scene: PackedScene
+var _explosion_scene: PackedScene = preload("res://scenes/explosion.tscn")
 var dead_timer: float = 0.0
 var _boss_phase2: bool = false
 var _boss_shots_fired: int = 0
 var bug_jump_cd: float = 0.0  # BUG variant: cooldown between hops
+var bug_contact_cd: float = 0.0  # BUG variant: cooldown between contact-damage hits
 
 var body_rect: ColorRect
 var head_rect: ColorRect
@@ -125,6 +128,8 @@ func _process(delta: float) -> void:
 		attack_cd -= delta
 	if bug_jump_cd > 0:
 		bug_jump_cd -= delta
+	if bug_contact_cd > 0:
+		bug_contact_cd -= delta
 	if spot_timer > 0:
 		spot_timer -= delta
 	if not is_instance_valid(player_ref):
@@ -181,12 +186,15 @@ func _update_bug_physics(delta: float) -> void:
 		velocity.y = BUG_JUMP_VELOCITY
 		velocity.x = dir * chase_speed * BUG_HOP_SPEED_MULT
 		bug_jump_cd = BUG_JUMP_COOLDOWN
-		AudioManager.play_sfx(AudioManager.SFX_ENEMY_SHOOT)  # reuse as a hop cue
+		AudioManager.play_sfx(AudioManager.SFX_ENEMY_HOP)
 	# Contact damage while overlapping the player (airborne slam or close pass).
 	# Only during active engagement — PATROL means it hasn't noticed the player.
+	# Cooldown-gated so the hit rate is bounded independent of the player's
+	# i-frames (avoids every-frame damage if i-frame tuning changes later).
 	var dist := global_position.distance_to(player_ref.global_position)
-	if dist < 30.0 and ai_state in [AIState.CHASE, AIState.ATTACK] and player_ref.has_method("take_damage"):
+	if dist < 30.0 and ai_state in [AIState.CHASE, AIState.ATTACK] and bug_contact_cd <= 0 and player_ref.has_method("take_damage"):
 		player_ref.take_damage(BUG_CONTACT_DAMAGE)
+		bug_contact_cd = BUG_CONTACT_COOLDOWN
 
 func _update_ai(delta: float) -> void:
 	var dist_to_player := global_position.distance_to(player_ref.global_position)
@@ -306,9 +314,8 @@ func _die() -> void:
 		CameraFX.shake(14.0)
 
 func _spawn_explosion() -> void:
-	var exp_scene := load("res://scenes/explosion.tscn")
-	if exp_scene:
-		var fx := exp_scene.instantiate()
+	if _explosion_scene:
+		var fx := _explosion_scene.instantiate()
 		fx.global_position = global_position
 		fx.big = is_boss
 		fx.is_player_explosion = true

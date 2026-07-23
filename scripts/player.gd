@@ -24,7 +24,14 @@ const GRENADE_RADIUS: float = 100.0
 
 var current_state: State = State.IDLE
 var facing: int = 1
-var hp: int = MAX_HP
+# HP lives on GameManager.player_health (single source of truth, mirrored for
+# the HUD). `hp` is kept as a computed accessor so existing call sites read and
+# write through the same value instead of drifting out of sync.
+var hp: int:
+	get:
+		return GameManager.player_health
+	set(value):
+		GameManager.player_health = clamp(value, 0, MAX_HP)
 var invincible: bool = false
 var invincible_timer: float = 0.0
 var jumps_left: int = MAX_JUMPS  # decremented on each jump, refilled on landing
@@ -41,6 +48,7 @@ var bullet_scene: PackedScene
 var grenade_scene: PackedScene
 var spawn_point: Vector2 = Vector2.ZERO
 var _dying: bool = false  # guards the death tween so it only runs once
+var _explosion_scene: PackedScene = preload("res://scenes/explosion.tscn")
 
 var body_rect: ColorRect
 var head_rect: ColorRect
@@ -103,6 +111,9 @@ func _handle_input() -> void:
 		_shoot()
 	if Input.is_action_just_pressed("grenade") and grenade_cd <= 0:
 		_throw_grenade()
+	# Auto-melee: when not firing, swing the knife at any enemy in range. This
+	# mirrors Metal Slug's "knife when you're not shooting" feel and is gated
+	# by knife_cd so it isn't spammed every frame.
 	if not fire_held and knife_cd <= 0:
 		_try_melee()
 	if Input.is_action_just_pressed("enter_vehicle"):
@@ -275,9 +286,11 @@ func _select_weapon(weapon_id: int) -> void:
 func select_weapon_external(weapon_id: int) -> void:
 	current_weapon = weapon_id
 
-## Restores HP from a health pickup; clamps to MAX_HP.
+## Restores HP from a health pickup; routes through GameManager so HP stays
+## single-sourced. (Kept as an explicit API for callers that want a player-
+## facing heal method rather than the GameManager one.)
 func heal(amount: int) -> void:
-	hp = min(MAX_HP, hp + amount)
+	GameManager.add_health(amount)
 
 func _cycle_weapon() -> void:
 	var next_w := current_weapon
@@ -304,13 +317,15 @@ func _spawn_muzzle_flash() -> void:
 func take_damage(amount: int) -> void:
 	if invincible or current_state == State.DIE:
 		return
-	hp = max(0, hp - amount)
+	# Route through GameManager so there is a single owner of HP. The local
+	# `hp` accessor reads back from GameManager.player_health afterwards, so
+	# the death check below reflects the authoritative value.
+	GameManager.player_take_damage(amount)
 	invincible = true
 	invincible_timer = INVINCIBLE_TIME
 	current_state = State.HURT
 	velocity.x = -facing * 150
 	velocity.y = -200
-	GameManager.player_take_damage(amount)
 	AudioManager.play_sfx(AudioManager.SFX_PLAYER_HURT)
 	CameraFX.shake(4.0)
 	if hp <= 0:
@@ -346,13 +361,11 @@ func respawn() -> void:
 	invincible_timer = 3.0
 	global_position = spawn_point
 	velocity = Vector2.ZERO
-	GameManager.player_health = MAX_HP
 	GameManager.health_changed.emit(hp, MAX_HP)
 
 func _spawn_explosion() -> void:
-	var exp_scene := load("res://scenes/explosion.tscn")
-	if exp_scene:
-		var fx := exp_scene.instantiate()
+	if _explosion_scene:
+		var fx := _explosion_scene.instantiate()
 		fx.global_position = global_position
 		fx.is_player_explosion = true
 		get_parent().add_child(fx)

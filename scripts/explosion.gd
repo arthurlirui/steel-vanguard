@@ -5,6 +5,9 @@ extends Area2D
 @export var small: bool = false
 @export var damage: int = 0
 @export var radius: float = 80.0
+## When true, this explosion does NOT damage the player (player-caused).
+## When false (enemy/environment), it WILL damage the player if in radius.
+@export var is_player_explosion: bool = true
 
 var _age: float = 0.0
 var _lifetime: float = 0.5
@@ -13,18 +16,21 @@ var _glow: ColorRect
 var _hit_done: bool = false
 
 func _ready() -> void:
-	# Scale based on type
+	# Scale based on type, but only fill in defaults for fields the spawner
+	# did NOT already set. grenade.gd assigns damage/radius BEFORE add_child,
+	# so we must not clobber them here (the prior bug made every grenade deal
+	# a flat 20 damage / 80 radius regardless of setup()).
 	if big:
-		radius = 150.0
-		damage = 50
+		radius = 150.0 if radius == 0.0 else radius
+		damage = 50 if damage == 0 else damage
 		_lifetime = 0.8
 	elif small:
-		radius = 40.0
+		radius = 40.0 if radius == 0.0 else radius
 		damage = 0
 		_lifetime = 0.3
 	else:
-		radius = 80.0
-		damage = 20
+		radius = 80.0 if radius == 0.0 else radius
+		damage = 20 if damage == 0 else damage
 		_lifetime = 0.5
 	_create_visual()
 	# Apply damage in radius (once)
@@ -61,25 +67,24 @@ func _create_visual() -> void:
 	add_child(_rect)
 
 func _apply_area_damage() -> void:
-	var space := get_world_2d().direct_space_state
 	var bodies := get_tree().get_nodes_in_group("enemies")
 	for body in bodies:
 		if is_instance_valid(body) and global_position.distance_to(body.global_position) <= radius:
 			if body.has_method("take_damage"):
 				body.take_damage(damage)
-	# Also damage player if close (but not for player-caused explosions)
-	# Commented out to avoid friendly fire from own grenades
-	# var player := get_tree().get_first_node_in_group("player")
-	# if player and global_position.distance_to(player.global_position) <= radius:
-	#     GameManager.player_take_damage(damage)
+	# Damage the player only for non-player (enemy/environment) explosions
+	if not is_player_explosion:
+		var player := get_tree().get_first_node_in_group("player")
+		if player and is_instance_valid(player) and global_position.distance_to(player.global_position) <= radius:
+			if player.has_method("take_damage"):
+				player.take_damage(damage)
+	# Damage destructibles regardless of source
+	var dests := get_tree().get_nodes_in_group("destructible")
+	for d in dests:
+		if is_instance_valid(d) and global_position.distance_to(d.global_position) <= radius:
+			if d.has_method("take_damage"):
+				d.take_damage(damage)
 
 func _shake_screen() -> void:
-	var cam := get_viewport().get_camera_2d()
-	if not cam:
-		return
 	var amount := 4.0 if small else (12.0 if big else 6.0)
-	var orig := cam.offset
-	var tw := create_tween()
-	for i in 5:
-		tw.tween_property(cam, "offset", orig + Vector2(randf_range(-amount, amount), randf_range(-amount, amount)), 0.04)
-	tw.tween_property(cam, "offset", orig, 0.04)
+	CameraFX.shake(amount)

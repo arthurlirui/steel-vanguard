@@ -20,6 +20,7 @@ extends Area2D
 var _velocity: Vector2 = Vector2.ZERO
 var _age: float = 0.0
 var _visual: ColorRect
+var _explosion_scene: PackedScene = preload("res://scenes/explosion.tscn")
 
 # ============================================================
 # Lifecycle
@@ -36,15 +37,18 @@ func _process(delta: float) -> void:
 	_age += delta
 	if _age >= lifetime:
 		queue_free()
-	# Off-screen culling
+		return
+	# Off-screen culling — base on the camera's actual visible rect, not the
+	# fixed viewport origin (which is wrong for a scrolling camera).
 	var cam := get_viewport().get_camera_2d()
 	if cam:
-		var screen_rect := cam.get_viewport_rect()
+		var vr := cam.get_viewport_rect().size
+		var center := cam.global_position
 		var margin := 200.0
-		if global_position.x < screen_rect.position.x - margin \
-				or global_position.x > screen_rect.end.x + margin \
-				or global_position.y < screen_rect.position.y - margin \
-				or global_position.y > screen_rect.end.y + margin:
+		if global_position.x < center.x - vr.x * 0.5 - margin \
+				or global_position.x > center.x + vr.x * 0.5 + margin \
+				or global_position.y < center.y - vr.y * 0.5 - margin \
+				or global_position.y > center.y + vr.y * 0.5 + margin:
 			queue_free()
 
 # ============================================================
@@ -95,18 +99,26 @@ func _on_body_entered(body: Node) -> void:
 			_spawn_hit_effect()
 			queue_free()
 		elif body.is_in_group("destructible"):
-			if body.has_method("destroy"):
-				body.destroy()
+			if body.has_method("take_damage"):
+				body.take_damage(damage)
 			queue_free()
 		elif body.is_in_group("walls"):
+			_spawn_hit_effect()
 			queue_free()
 	else:
 		if body.is_in_group("player"):
-			GameManager.player_take_damage(damage)
+			# Route through the player's own take_damage so i-frames,
+			# knockback, and the HURT state apply (instead of mutating
+			# GameManager HP directly).
+			if body.has_method("take_damage"):
+				body.take_damage(damage)
 			queue_free()
 		elif body.is_in_group("vehicle"):
 			if body.has_method("take_damage"):
 				body.take_damage(damage)
+			queue_free()
+		elif body.is_in_group("walls"):
+			_spawn_hit_effect()
 			queue_free()
 
 func _on_area_entered(area: Area2D) -> void:
@@ -117,9 +129,8 @@ func _on_area_entered(area: Area2D) -> void:
 		queue_free()
 
 func _spawn_hit_effect() -> void:
-	var exp_scene := load("res://scenes/explosion.tscn")
-	if exp_scene:
-		var fx := exp_scene.instantiate()
+	if _explosion_scene:
+		var fx := _explosion_scene.instantiate()
 		fx.global_position = global_position
 		fx.small = true
-		get_tree().current_scene.add_child(fx)
+		get_parent().add_child(fx)

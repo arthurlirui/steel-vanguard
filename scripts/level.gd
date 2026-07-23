@@ -80,6 +80,7 @@ func _spawn_player() -> void:
 	player_scene = load("res://scenes/player.tscn")
 	player_node = player_scene.instantiate()
 	player_node.global_position = Vector2(150, GROUND_Y - 50)
+	player_node.died.connect(_on_player_died)
 	add_child(player_node)
 
 func _spawn_enemies() -> void:
@@ -190,8 +191,10 @@ func _process(delta: float) -> void:
 	# Check win condition
 	if player_node.global_position.x >= level_end_x and not boss_spawned:
 		_spawn_boss()
-	# Boss defeated → victory
-	if boss_spawned and boss_defeated:
+	# Boss defeated → victory (only transition once; victory() plays the SFX
+	# and would otherwise re-trigger it every frame while boss_defeated stays
+	# true).
+	if boss_spawned and boss_defeated and GameManager.current_state != GameManager.GameState.VICTORY:
 		GameManager.victory()
 
 func _spawn_boss() -> void:
@@ -199,6 +202,12 @@ func _spawn_boss() -> void:
 	var boss_scene := load("res://scenes/enemy_soldier.tscn")
 	var boss := boss_scene.instantiate()
 	boss.global_position = Vector2(LEVEL_WIDTH - 300, GROUND_Y - 100)
+	# Pick a distinct, heavier variant before _ready runs so _apply_type_defaults
+	# (BAZOOKA: slow, long-range, heavy projectile) shapes the boss's base kit;
+	# configure_as_boss then layers boss HP/scale/phase-2 behavior on top.
+	# EnemyType.BAZOOKA == 2 (enemy_soldier.gd has no class_name, so we use the
+	# raw enum value to avoid introducing a load-time dependency here).
+	boss.enemy_type = 2
 	boss.died.connect(_on_boss_died)
 	add_child(boss)
 	# Configure after add_child so _ready has applied defaults; configure_as_boss
@@ -229,3 +238,8 @@ func _on_enemy_died(pos: Vector2) -> void:
 
 func _on_boss_died(pos: Vector2) -> void:
 	boss_defeated = true
+
+# Player death — kick an extra screen shake so the death moment reads on camera
+# even before the explosion tween plays out.
+func _on_player_died() -> void:
+	CameraFX.shake(14.0)

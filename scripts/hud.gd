@@ -59,15 +59,7 @@ func _connect_signals() -> void:
 	GameManager.state_changed.connect(_on_state_changed)
 	GameManager.enemies_remaining_changed.connect(_on_enemies_remaining_changed)
 
-# R key restart — only fires outside active play (GAME_OVER / VICTORY / PAUSED),
-# so it can't be triggered by accident mid-level. process_mode is ALWAYS, so
-# this still receives input while the tree is paused.
-func _unhandled_input(_event: InputEvent) -> void:
-	if Input.is_action_just_pressed("restart"):
-		var st: int = GameManager.current_state
-		if st == GameManager.GameState.GAME_OVER or st == GameManager.GameState.VICTORY or st == GameManager.GameState.PAUSED:
-			GameManager.restart_game()
-			get_viewport().set_input_as_handled()
+# Input handling (restart / pause) lives in the single _unhandled_input below.
 
 func _create_top_hud() -> void:
 	var top_panel := Panel.new()
@@ -204,10 +196,19 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventScreenDrag:
 		_handle_drag(event)
 
+# R key restart and pause toggle. process_mode is ALWAYS, so these still
+# receive input while the tree is paused.
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause"):
 		_toggle_pause()
 		get_viewport().set_input_as_handled()
+	# R key restart — only outside active play (GAME_OVER / VICTORY / PAUSED),
+	# so it can't be triggered by accident mid-level.
+	if Input.is_action_just_pressed("restart"):
+		var st: int = GameManager.current_state
+		if st == GameManager.GameState.GAME_OVER or st == GameManager.GameState.VICTORY or st == GameManager.GameState.PAUSED:
+			GameManager.restart_game()
+			get_viewport().set_input_as_handled()
 
 func _handle_touch(event: InputEventScreenTouch) -> void:
 	if event.pressed:
